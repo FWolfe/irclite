@@ -1,9 +1,51 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 """
+    irclite - a minimal lightwight IRC client API using gevent
+
+import irclite
+client = irclite.Client()
+
+# load the config dict
+client.load({
+    'nick' : 'MyBot', 'ident' : 'MyBot', 'realname' : 'MyBot', 'debug' : False,
+    'networks' : ({
+            'name' : 'MyNetwork',
+            'host' : 'irc.mynetwork.com',
+            'port' : '6667',
+            'enabled' : True,
+        }),
+    'onconnect' : [
+        lambda net: net.name == "MyNetwork" and net.join('#Chat'),
+    ],
+})
+
+client.init() # setup our network greenlets
+client.run() # non-blocking waiting for completion
 
 
-@author: Fenris_Wolf
+
+MIT License
+
+Copyright (c) 2013 Fenris_Wolf, YSPStudios
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 """
 import re
 import time
