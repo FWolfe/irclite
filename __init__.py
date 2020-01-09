@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
     irclite - a minimal lightwight IRC client API using gevent
@@ -177,7 +177,7 @@ class Network(object):
     def run(self):
         """Connects to the IRC network and performs the main loop.
         """
-        print "start run %s" % self.name
+        print("start run %s" % self.name)
         if self.enabled:
             self.connect()
         while True:
@@ -222,9 +222,9 @@ class Network(object):
 
     def recv(self):
         try:
-            data = self.sock.recv(1024)
+            data = str(self.sock.recv(1024))
             if data == '':
-                print "Error: %s - No data on recv" % self.name
+                print("Error: %s - No data on recv" % self.name)
                 return None # socket broken
 
             left = not data.endswith("\n")
@@ -236,10 +236,10 @@ class Network(object):
             data = [line for line in data if len(line)> 0]
             return data
         except socket.error:
-            print "Error: %s - Socket error on recv" % self.name
+            print("Error: %s - Socket error on recv" % self.name)
             return None
         except gevent.Timeout:
-            print "Error: %s - Socket timeout on recv" % self.name
+            print("Error: %s - Socket timeout on recv" % self.name)
             return None
 
 
@@ -250,10 +250,10 @@ class Network(object):
             self.sock.connect((self.host, self.port))
             self.connected = True
             self.send("NICK %s\r\nUSER %s 0 0: %s" % (self.nick, self.ident, self.realname))
-            print "connecting %s" % self.name
+            print("connecting %s" % self.name)
             self._ctimer = None
         except socket.error:
-            print "Error: %s - connection failed. Retrying in 30..." % self.name
+            print("Error: %s - connection failed. Retrying in 30..." % self.name)
             self.connected = False
             self._ctimer = gevent.spawn_later(30, self.connect)
             return False
@@ -275,14 +275,14 @@ class Network(object):
     def send(self, msg):
         """sends a message over the socket"""
         if self.config.get('debug'):
-            print self, '-->', msg
+            print(self, '-->', msg)
         try:
-            result = self.sock.sendall(msg + "\r\n")
+            result = self.sock.sendall(bytearray(msg + "\r\n", 'ascii'))
             if result == 0:
-                print "Error: %s - No Data on send" % self.name
+                print("Error: %s - No Data on send" % self.name)
                 self.close()
         except socket.error:
-            print "Error: %s - Socket error on recv" % self.name
+            print("Error: %s - Socket error on recv" % self.name)
             self.close()
 
     def ping(self):
@@ -338,13 +338,13 @@ class Network(object):
         """
         config = self.config
         if config.get('debug'):
-            print self, '<--', repr(msg)
+            print(self, '<--', repr(msg))
 
         if msg.type == 'PING':
             ctime = time.time()
             self.lastping = (ctime, ctime - self.lastping[0])
             if config.get('debug'):
-                print "ping time: %s seconds" % self.lastping[1]
+                print("ping time: %s seconds" % self.lastping[1])
             self.send('PONG ' + msg.text)
 
         elif msg.type == 'PONG':
@@ -425,7 +425,7 @@ class Client(object):
         """Waits for all Network greenlets to finish
         """
         gevent.joinall([x.green for x in self.networks.values()])
-        print "IRCBot finished"
+        print("IRCBot finished")
 
 
     def trigger_command(self, network, msg, cmd):
