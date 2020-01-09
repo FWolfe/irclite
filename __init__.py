@@ -222,7 +222,8 @@ class Network(object):
 
     def recv(self):
         try:
-            data = str(self.sock.recv(1024))
+            data = self.sock.recv(1024)
+            data = data.decode()
             if data == '':
                 print("Error: %s - No data on recv" % self.name)
                 return None # socket broken
