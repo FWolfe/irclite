@@ -215,10 +215,10 @@ class Network(object):
         self.enabled = True
 
     def disable(self):
+        self.enabled = False
         if self.connected:
             self.disconnect()
         self._kill_timers()
-        self.enabled = False
 
     def recv(self):
         try:
@@ -268,10 +268,11 @@ class Network(object):
 
     def disconnect(self):
         """quits the network, closes the socket and kills the greenlet"""
+        self.enabled = False
         self.send("QUIT")
         self.sock.shutdown(socket.SHUT_RDWR)
         self.close()
-        self.enabled = False
+        self._kill_timers()
 
     def send(self, msg):
         """sends a message over the socket"""
@@ -355,12 +356,15 @@ class Network(object):
         elif msg.type == '1' or msg.type == '001':
             self.server = msg.sender
 
-        elif (msg.type == '376' or msg.type == '422') and config.get('onconnect'):
-            for func in config.get('onconnect'):
+        elif (msg.type == '376' or msg.type == '422'):
+            for func in config.get('onconnect', []):
                 try:
                     func(msg.network)
                 except:
                     pass
+            for chan in config.get('channels', []):
+                self.join(chan)
+
             self._ptimer = gevent.spawn_later(30, self.pingtimer)
 
         elif msg.type == 'NICK':
@@ -414,6 +418,8 @@ class Client(object):
         """
         for key, value in self.networks.items():
             value.disconnect()
+            value.green.kill()
+            value._kill_timers()
 
     def init(self):
         """Performs any initialization actions and calls Network.init() for
