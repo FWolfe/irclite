@@ -51,24 +51,32 @@ import re
 import time
 import socket
 import gevent
+import logging
 
 RE_TYPE = re.compile(r"^(?:\:(\S+)|\:?([a-z0-9A-Z_-]+\.[a-z0-9A-Z_\.-]+))$")
 RE_SENDER = re.compile(r"^\:?([^\!]+)\!([^\@]+)\@(\S+)$")
 
+logger = logging.getLogger(__name__)
 class Message(object):
     """Class representing a IRC message
     """
+    __slots__ = ('network', 'text', 'dest', 'type', 'sender',
+                 'nick', 'ident', 'host', 'chan', 'tokens', 'raw')
+
     def __init__(self, network, raw):
+        self.text = None
+        self.dest = None
+        self.type = None
+        self.sender = None
+        self.nick = None
+        self.ident = None
+        self.host = None
+        self.chan = None
+
         self.network = network
         self.raw = raw
-        self.text = ''
-        self.dest = ''
-        self.type = ''
-        self.sender = ''
-        self.nick = ''
-        self.ident = ''
-        self.host = ''
         self.tokens = raw.split()
+
         match = RE_TYPE.match(self.tokens[0])
         if match:
             self.sender = match.group(1) or match.group(2)
@@ -91,6 +99,23 @@ class Message(object):
                 self.nick = match.group(1)
                 self.ident = match.group(2)
                 self.host = match.group(3)
+
+
+    def reply(self, text):
+        if self.type != 'PRIVMSG':
+            return # TODO: raise exception
+        if self.chan:
+            self.network.privmsg(self.chan, text)
+        else:
+            self.network.privmsg(self.sender, text)
+
+
+    def is_numeric(self):
+        try:
+            int(self.type)
+            return True
+        except ValueError:
+            return False
 
 
     def as_command(self, start=1, stop=None):
@@ -177,7 +202,7 @@ class Network(object):
     def run(self):
         """Connects to the IRC network and performs the main loop.
         """
-        print("start run %s" % self.name)
+        logger.info("Starting run() %s", self.name)
         if self.enabled:
             self.connect()
         while True:
@@ -225,7 +250,7 @@ class Network(object):
             data = self.sock.recv(1024)
             data = data.decode()
             if data == '':
-                print("Error: %s - No data on recv" % self.name)
+                logger.warning("No data on recv() for %s", self.name)
                 return None # socket broken
 
             left = not data.endswith("\n")
@@ -234,13 +259,13 @@ class Network(object):
             data = re.split('\r?\n', data)
             if left:
                 self._buffer = data.pop()
-            data = [line for line in data if len(line)> 0]
+            data = [line for line in data if len(line) > 0]
             return data
         except socket.error:
-            print("Error: %s - Socket error on recv" % self.name)
+            logger.warning("Socket error on recv() for %s", self.name)
             return None
         except gevent.Timeout:
-            print("Error: %s - Socket timeout on recv" % self.name)
+            logger.warning("Socket timeout on recv() for %s", self.name)
             return None
 
 
@@ -251,20 +276,22 @@ class Network(object):
             self.sock.connect((self.host, self.port))
             self.connected = True
             self.send("NICK %s\r\nUSER %s 0 0: %s" % (self.nick, self.ident, self.realname))
-            print("connecting %s" % self.name)
+            logger.info("Connecting to %s", self.name)
             self._ctimer = None
         except socket.error:
-            print("Error: %s - connection failed. Retrying in 30..." % self.name)
+            logger.info("Connection to %s failed. Retrying in 30..." % self.name)
             self.connected = False
             self._ctimer = gevent.spawn_later(30, self.connect)
             return False
         return True
+
 
     def close(self):
         if self.sock:
             self.sock.close()
         self._kill_timers()
         self.connected = False
+
 
     def disconnect(self):
         """quits the network, closes the socket and kills the greenlet"""
@@ -276,8 +303,7 @@ class Network(object):
 
     def send(self, msg):
         """sends a message over the socket"""
-        if self.config.get('debug'):
-            print(self, '-->', msg)
+        logger.debug("Send -> %s", msg)
         try:
             result = self.sock.sendall(bytearray(msg + "\r\n", 'ascii'))
             if result == 0:
@@ -339,14 +365,12 @@ class Network(object):
         """parses the IRC message
         """
         config = self.config
-        if config.get('debug'):
-            print(self, '<--', repr(msg))
+        logger.debug("Recv <-- %s", repr(msg))
 
         if msg.type == 'PING':
             ctime = time.time()
             self.lastping = (ctime, ctime - self.lastping[0])
-            if config.get('debug'):
-                print("ping time: %s seconds" % self.lastping[1])
+            logger.debug("ping time: %s seconds", self.lastping[1])
             self.send('PONG ' + msg.text)
 
         elif msg.type == 'PONG':
@@ -410,8 +434,13 @@ class Client(object):
         """
         self.config = config
         for net in self.config.get('networks', []):
-            self.add_network(net['name'], net['host'], net.get('port', 6667),
-                             net.get('config', self.config), net.get('enabled', True))
+            self.add_network(
+                net['name'],
+                net['host'],
+                net.get('port', 6667),
+                net.get('config', self.config),
+                net.get('enabled', True))
+
 
     def shutdown(self):
         """Disconnects and shuts down all Network objects
@@ -421,6 +450,7 @@ class Client(object):
             value.green.kill()
             value._kill_timers()
 
+
     def init(self):
         """Performs any initialization actions and calls Network.init() for
         all Network objects
@@ -428,11 +458,12 @@ class Client(object):
         for key, value in self.networks.items():
             value.init()
 
+
     def run(self):
         """Waits for all Network greenlets to finish
         """
         gevent.joinall([x.green for x in self.networks.values()])
-        print("IRCBot finished")
+        logger.info("run() finished")
 
 
     def trigger_command(self, network, msg, cmd):
@@ -440,3 +471,4 @@ class Client(object):
 
     def trigger_event(self, network, msg):
         pass
+
