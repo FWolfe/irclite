@@ -3,6 +3,7 @@
 """
     irclite - a minimal lightwight IRC client API using gevent
 
+
 import irclite
 client = irclite.Client()
 
@@ -53,69 +54,85 @@ import socket
 import gevent
 import logging
 
+# messages come in 3 formats:
+# :nick[!ident@host] TYPE data
+# :server.name TYPE data (: prefix maybe excluded)
+# TYPE data
+
 RE_TYPE = re.compile(r"^(?:\:(\S+)|\:?([a-z0-9A-Z_-]+\.[a-z0-9A-Z_\.-]+))$")
 RE_SENDER = re.compile(r"^\:?([^\!]+)\!([^\@]+)\@(\S+)$")
 
 logger = logging.getLogger(__name__)
-class Message(object):
-    """Class representing a IRC message
-    """
-    __slots__ = ('network', 'text', 'dest', 'type', 'sender',
-                 'nick', 'ident', 'host', 'chan', 'tokens', 'raw')
 
-    def __init__(self, network, raw):
+class Event(object):
+    """Class representing a IRC event
+    """
+    __slots__ = ('network', 'text', 'dest', 'type', 'source',
+                 'nick', 'ident', 'host', 'chan', 'data')
+
+    def __init__(self, network, data):
         self.text = None
         self.dest = None
         self.type = None
-        self.sender = None
+        self.source = None
         self.nick = None
         self.ident = None
         self.host = None
         self.chan = None
 
         self.network = network
-        self.raw = raw
-        self.tokens = raw.split()
+        self.data = data
+        tokens = data.split()
 
-        match = RE_TYPE.match(self.tokens[0])
+        # identify msg format
+        match = RE_TYPE.match(tokens[0])
         if match:
-            self.sender = match.group(1) or match.group(2)
-            self.type = self.tokens[1]
-        else:
-            self.type = self.tokens[0]
+            self.source = match.group(1) or match.group(2)
+            self.type = tokens[1]
 
-        match = re.search(r"\:(.*)$", raw[1:])
+        else:
+            self.type = tokens[0]
+
+        match = re.search(r"\:(.*)$", data[1:])
         if match:
             self.text = match.group(1)
 
-        if len(self.tokens) > 2 and self.type == self.tokens[1]:
-            self.dest = self.tokens[2]
+        # for any msg with 3+ tokens that has the msg type identifed in 2nd token
+        # the 3rd token (index 2) is a destination for the msg
+        if len(tokens) > 2 and self.type == tokens[1]:
+            self.dest = tokens[2]
             if self.dest.startswith('#'):
                 self.chan = self.dest
 
-        if self.sender:
-            match = RE_SENDER.match(self.sender)
+        if self.source:
+            match = RE_SENDER.match(self.source)
             if match:
                 self.nick = match.group(1)
                 self.ident = match.group(2)
                 self.host = match.group(3)
 
+        # convert any '001' style numerics to '1' for consistancy across ircds
+        numeric = self.as_numeric()
+        if numeric:
+            self.type = str(numeric)
 
     def reply(self, text):
         if self.type != 'PRIVMSG':
             return # TODO: raise exception
+
         if self.chan:
             self.network.privmsg(self.chan, text)
+
         else:
-            self.network.privmsg(self.sender, text)
+            self.network.privmsg(self.source, text)
 
 
-    def is_numeric(self):
+    def as_numeric(self):
         try:
-            int(self.type)
-            return True
+            return int(self.type)
+
         except ValueError:
-            return False
+            return 0
 
 
     def as_command(self, start=1, stop=None):
@@ -127,12 +144,14 @@ class Message(object):
         """
         try:
             return ' '.join(self.text.split()[start:stop])
+
         except IndexError:
             return None
 
 
     def __repr__(self):
-        return self.raw
+        return self.data
+
 
     def __str__(self):
         return self.text
@@ -146,24 +165,27 @@ class Channel(object):
         self.clients = []
         self.modes = False
 
+
     def __str__(self):
         return self.name
+
 
     def __cmp__(self, other):
         if self.name < other:
             return -1
-        elif self.name == other:
+
+        if self.name == other:
             return 0
-        else:
-            return -1
+
+        return 1
 
 
 
 class Network(object):
     """Class representing a IRC network.
     """
-    def __init__(self, parent, name, host, port, config, enabled=True):
-        self._parent = parent
+    def __init__(self, client, name, host, port=6667, config=None, enabled=True):
+        self.client = client
         self.config = config
         self.name = name
         self.enabled = enabled
@@ -173,31 +195,36 @@ class Network(object):
         self.host = host
         self.port = port
         self.server = None
-        self.users = {}
+        self.users = {} # not implemented
         self.channels = {}
         self.lastping = (0, 0)
         self.green = None
         self.sock = None
         self.connected = False
         self._buffer = ""
-        self._ctimer = None
-        self._ptimer = None
+        self.timers = {}
+
 
     def __str__(self):
         return self.name
 
+
     def __cmp__(self, other):
         if self.name < other:
             return -1
+
         elif self.name == other:
             return 0
+
         else:
             return -1
+
 
     def init(self):
         """initializes the network, spawning a greenlet
         """
         self.green = gevent.spawn(self.run)
+
 
     def run(self):
         """Connects to the IRC network and performs the main loop.
@@ -205,45 +232,59 @@ class Network(object):
         logger.info("Starting run() %s", self.name)
         if self.enabled:
             self.connect()
+
         while True:
             if not self.enabled:
                 gevent.sleep(1)
                 continue
 
             if not self.connected:
-                if not self._ctimer:
-                    self._ctimer = gevent.spawn_later(30, self.connect)
+                self.add_timer('connect', 30, self.connect, False)
                 gevent.sleep(0.01)
                 continue
 
             data = self.recv()
             if data is None:
                 self.close()
-                self._ctimer = gevent.spawn_later(30, self.connect)
+                self.add_timer('connect', 30, self.connect)
                 continue
 
             for line in data:
-                self.parse(Message(self, line))
+                self.parse(line)
 
-    def _kill_timers(self):
-        if self._ctimer:
-            self._ctimer.kill()
-        if self._ptimer:
-            self._ptimer.kill()
-        self._ctimer = None
-        self._ptimer = None
+
+    def kill_timer(self, timer):
+        if timer in self.timers:
+            self.timers[timer].kill()
+            del self.timers[timer]
+
+
+    def kill_all_timers(self):
+        for t in self.timers:
+            self.timers[t].kill()
+            del self.timers[t]
+
+
+    def add_timer(self, timer, delay, callback, replace=True):
+        if replace:
+            self.kill_timer(timer)
+
+        self.timers[timer] = gevent.spawn_later(delay, callback)
+
 
     def enable(self):
-        if self.enabled is False:
-            if not self._ctimer:
-                self._ctimer = gevent.spawn_later(30, self.connect)
+        #if self.enabled is False and 'connect' not in self.timers:
+        #    self.add_timer('connect', 30, self.connect)
         self.enabled = True
+
 
     def disable(self):
         self.enabled = False
         if self.connected:
             self.disconnect()
-        self._kill_timers()
+
+        self.kill_all_timers()
+
 
     def recv(self):
         try:
@@ -251,7 +292,7 @@ class Network(object):
             data = data.decode()
             if data == '':
                 logger.warning("No data on recv() for %s", self.name)
-                return None # socket broken
+                return None
 
             left = not data.endswith("\n")
             data = self._buffer + data
@@ -259,11 +300,14 @@ class Network(object):
             data = re.split('\r?\n', data)
             if left:
                 self._buffer = data.pop()
+
             data = [line for line in data if len(line) > 0]
             return data
+
         except socket.error:
             logger.warning("Socket error on recv() for %s", self.name)
             return None
+
         except gevent.Timeout:
             logger.warning("Socket timeout on recv() for %s", self.name)
             return None
@@ -277,19 +321,22 @@ class Network(object):
             self.connected = True
             self.send("NICK %s\r\nUSER %s 0 0: %s" % (self.nick, self.ident, self.realname))
             logger.info("Connecting to %s", self.name)
-            self._ctimer = None
+            self.kill_timer('connect')
+
         except socket.error:
-            logger.info("Connection to %s failed. Retrying in 30..." % self.name)
+            logger.info("Connection to %s failed. Retrying in 30...", self.name)
             self.connected = False
-            self._ctimer = gevent.spawn_later(30, self.connect)
+            self.add_timer('connect', 30, self.connect)
             return False
+
         return True
 
 
     def close(self):
         if self.sock:
             self.sock.close()
-        self._kill_timers()
+
+        self.kill_all_timers()
         self.connected = False
 
 
@@ -299,45 +346,51 @@ class Network(object):
         self.send("QUIT")
         self.sock.shutdown(socket.SHUT_RDWR)
         self.close()
-        self._kill_timers()
+        #self.kill_all_timers() # redundant.
 
-    def send(self, msg):
+
+    def send(self, message):
         """sends a message over the socket"""
-        logger.debug("Send -> %s", msg)
+        logger.debug("Send -> %s", message)
         try:
-            result = self.sock.sendall(bytearray(msg + "\r\n", 'ascii'))
+            result = self.sock.sendall(bytearray(message + "\r\n", 'ascii'))
             if result == 0:
-                print("Error: %s - No Data on send" % self.name)
+                logger.error("No Data on send() for %s", self.name)
                 self.close()
+
         except socket.error:
-            print("Error: %s - Socket error on recv" % self.name)
+            logger.error("Socket error on send() for %s", self.name)
             self.close()
+
 
     def ping(self):
         """pings the remote irc server"""
-        self.send("PING %s" % self.server)
+        self.send(f'PING {self.server}')
+
 
     def privmsg(self, dest, message):
         """sends a PRIVMSG to the irc server"""
-        if not isinstance(message, list) and not isinstance(message, tuple):
+        if not isinstance(message, (list, tuple)):
             message = [message]
+
         for msg in message:
             lines = re.split('[\r\n]+', str(msg))
-            [self.send("PRIVMSG %s :%s" % (dest, x)) for x in lines]
+            [self.send(f'PRIVMSG {dest} :{text}') for text in lines]
 
 
-    def notice(self, dest, msg):
+    def notice(self, dest, message):
         """sends a NOTICE to the irc server"""
-        self.send("NOTICE %s :%s" %(dest, msg))
+        self.send(f'NOTICE {dest} :{message}')
+
 
     def join(self, dest):
         """sends a JOIN to the irc server"""
-        self.send("JOIN %s" % dest)
+        self.send(f'JOIN {dest}')
 
 
-    def part(self, dest, msg):
+    def part(self, dest, message):
         """sends a PART to the irc server"""
-        self.send("PART %s :%s" %(dest, msg))
+        self.send(f'PART {dest} :{message}')
 
 
     def getaccess(self, host):
@@ -346,117 +399,136 @@ class Network(object):
         for key, val in self.config.get('access', {}).items():
             if host == key:
                 return val
+
         return 0
 
 
     def pingtimer(self):
-        self._ptimer = None
+        self.kill_timer('ping')
         if not self.connected or not self.enabled:
             return
+
         ctime = time.time()
-        if ctime - self.lastping[0] > 60:
+        if ctime - self.lastping[0] > 60: # TODO: log reason
             self.close()
             return
+
         self.ping()
-        self._ptimer = gevent.spawn_later(30, self.pingtimer)
+        self.add_timer('ping', 30, self.pingtimer)
 
 
-    def parse(self, msg):
+    def parse(self, data):
         """parses the IRC message
         """
-        config = self.config
-        logger.debug("Recv <-- %s", repr(msg))
+        event = Event(self, data)
+        logger.debug("Recv <-- %s", repr(event))
+        handler = getattr(self, '_event_%s' % event.type, None)
+        if handler:
+            handler(event)
 
-        if msg.type == 'PING':
-            ctime = time.time()
-            self.lastping = (ctime, ctime - self.lastping[0])
-            logger.debug("ping time: %s seconds", self.lastping[1])
-            self.send('PONG ' + msg.text)
+        self.client.handle_event(event)
 
-        elif msg.type == 'PONG':
-            ctime = time.time()
-            self.lastping = (ctime, ctime - self.lastping[0])
 
-        elif msg.type == '1' or msg.type == '001':
-            self.server = msg.sender
+    def _event_PING(self, event):
+        ctime = time.time()
+        self.lastping = (ctime, ctime - self.lastping[0])
+        logger.debug("ping time: %s seconds", self.lastping[1])
+        self.send('PONG ' + event.text)
 
-        elif (msg.type == '376' or msg.type == '422'):
-            for func in config.get('onconnect', []):
-                try:
-                    func(msg.network)
-                except:
-                    pass
-            for chan in config.get('channels', []):
-                self.join(chan)
 
-            self._ptimer = gevent.spawn_later(30, self.pingtimer)
+    def _event_PONG(self, event):
+        ctime = time.time()
+        self.lastping = (ctime, ctime - self.lastping[0])
 
-        elif msg.type == 'NICK':
-            pass
 
-        elif msg.type == 'JOIN':
-            if msg.nick == self.nick: # we joined a channel
-                self.channels[msg.text] = Channel(msg.text)
+    def _event_JOIN(self, event):
+        if event.nick == self.nick: # we joined a channel
+            self.channels[event.text] = Channel(event.text)
 
-        elif msg.type == 'PART':
-            if msg.nick == config.nick:
-                del self.channels[msg.text]
 
-        self._parent.trigger_event(self, msg)
+    def _event_PRIVMSG(self, event):
+        if event.text[0] == self.config.get('command_prefix', ''):
+            match = re.match(r"(\S+)(?:\s+(.+))?$", event.text[1:])
+            if not match:
+                return
+            self.client.handle_command(match.group(1).lower(), match.group(2), event)
 
-        if msg.type == 'PRIVMSG' and msg.text[0] == self.config.get('control', '.'):
-            tokens = msg.text[1:].split(' ')
-            cmd = tokens[0].lower()
-            self._parent.trigger_command(self, msg, cmd)
 
+    def _event_1(self, event):
+        self.server = event.source
+
+
+    def _event_376(self, event):
+        for func in self.config.get('onconnect', []):
+            try:
+                func(self)
+
+            except:
+                pass
+
+        for chan in self.config.get('channels', []):
+            self.join(chan)
+
+        self.add_timer('ping', 30, self.pingtimer)
+
+
+    def _event_422(self, event):
+        self._event_376(event)
 
 
 class Client(object):
     """Class represeting a IRC client.
     """
     def __init__(self):
-        self.active = None
         self.networks = {}
         self.config = None
 
 
-    def add_network(self, name, host, port=6667, config=False, enabled=True):
+    def add_network(self, name, host, port=6667, config=None, enabled=True):
         """Adds a IRC network. Note this does not initialize it.
         """
         if not config:
             config = self.config
-        self.networks[name] = Network(self, name, host, port, config, enabled)
+
+        self.networks[name] = Network(
+            self,
+            name=name,
+            host=host,
+            port=port,
+            config=config,
+            enabled=enabled)
         return True
 
 
     def load(self, config):
-        """Adds sets up the config file and adds all networks defined in it.
+        """Sets up the config file and adds all networks defined in it.
         """
         self.config = config
         for net in self.config.get('networks', []):
             self.add_network(
-                net['name'],
-                net['host'],
-                net.get('port', 6667),
-                net.get('config', self.config),
-                net.get('enabled', True))
+                name=net['name'],
+                host=net['host'],
+                port=net.get('port', 6667),
+                #TODO: this needs a much better system, create a new config obj and apply defaults.
+                config=net.get('config', self.config),
+                enabled=net.get('enabled', True))
 
 
     def shutdown(self):
         """Disconnects and shuts down all Network objects
         """
-        for key, value in self.networks.items():
-            value.disconnect()
-            value.green.kill()
-            value._kill_timers()
+        for network in self.networks.values():
+            network.disconnect()
+            network.green.kill()
+            network.kill_all_timers()
 
 
     def init(self):
         """Performs any initialization actions and calls Network.init() for
         all Network objects
         """
-        for key, value in self.networks.items():
-            value.init()
+        for network in self.networks.values():
+            network.init()
 
 
     def run(self):
@@ -466,9 +538,9 @@ class Client(object):
         logger.info("run() finished")
 
 
-    def trigger_command(self, network, msg, cmd):
+    def handle_command(self, command, args, event):
         pass
 
-    def trigger_event(self, network, msg):
-        pass
 
+    def handle_event(self, event):
+        pass
