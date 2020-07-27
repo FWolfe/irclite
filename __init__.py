@@ -51,8 +51,8 @@ SOFTWARE.
 import re
 import time
 import socket
-import gevent
 import logging
+import gevent
 
 # messages come in 3 formats:
 # :nick[!ident@host] TYPE data
@@ -246,7 +246,8 @@ class Network(object):
 
 
     def kill_all_timers(self):
-        for t in self.timers:
+        #horribe sytnax. to avoid RuntimeError: dictionary changed size during iteration
+        for t in [x for x in self.timers.keys()]:
             self.timers[t].kill()
             del self.timers[t]
 
@@ -438,6 +439,11 @@ class Network(object):
             if not match:
                 return
             self.client.handle_command(match.group(1).lower(), match.group(2), event)
+
+
+    def _event_NICK(self, event):
+        if event.nick == self.nick:
+            self.nick = event.dest
 
 
     def _event_1(self, event):
