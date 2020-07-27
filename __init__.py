@@ -52,6 +52,7 @@ import re
 import time
 import socket
 import logging
+import random
 import gevent
 
 # messages come in 3 formats:
@@ -62,16 +63,22 @@ import gevent
 RE_TYPE = re.compile(r"^(?:\:(\S+)|\:?([a-z0-9A-Z_-]+\.[a-z0-9A-Z_\.-]+))$")
 RE_SENDER = re.compile(r"^\:?([^\!]+)\!([^\@]+)\@(\S+)$")
 
+# connection state flags
+OFFLINE = 0
+CONNECTING = 1
+ONLINE = 2
+
 logger = logging.getLogger(__name__)
 
 class Event(object):
     """Class representing a IRC event
     """
-    __slots__ = ('network', 'text', 'dest', 'type', 'source',
+    __slots__ = ('network', 'text', 'fulltext', 'dest', 'type', 'source',
                  'nick', 'ident', 'host', 'chan', 'data')
 
     def __init__(self, network, data):
         self.text = None
+        self.fulltext = None
         self.dest = None
         self.type = None
         self.source = None
@@ -103,6 +110,10 @@ class Event(object):
             self.dest = tokens[2]
             if self.dest.startswith('#'):
                 self.chan = self.dest
+            if len(tokens) > 3:
+                pos = data.index(self.dest) + len(self.dest) + 1
+                if len(data) >= pos:
+                    self.fulltext = data[pos:] 
 
         if self.source:
             match = RE_SENDER.match(self.source)
@@ -187,10 +198,11 @@ class Network(object):
         self.lastping = (0, 0)
         self.green = None
         self.sock = None
-        self.connected = False
+        self.connection_state = OFFLINE
         self._buffer = ""
         self.timers = {}
-
+        self.ircd_options = {}
+        self.ircd_flags = []
 
     def __str__(self):
         return self.name
@@ -224,7 +236,7 @@ class Network(object):
                 gevent.sleep(1)
                 continue
 
-            if not self.connected:
+            if not self.connection_state:
                 self.add_timer('connect', 30, self.connect, False)
                 gevent.sleep(0.01)
                 continue
@@ -267,7 +279,7 @@ class Network(object):
 
     def disable(self):
         self.enabled = False
-        if self.connected:
+        if self.connection_state:
             self.disconnect()
 
         self.kill_all_timers()
@@ -305,14 +317,14 @@ class Network(object):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             self.sock.connect((self.host, self.port))
-            self.connected = True
+            self.connection_state = CONNECTING
             self.send("NICK %s\r\nUSER %s 0 0: %s" % (self.nick, self.ident, self.realname))
             logger.info("Connecting to %s", self.name)
             self.kill_timer('connect')
 
         except socket.error:
             logger.info("Connection to %s failed. Retrying in 30...", self.name)
-            self.connected = False
+            self.connection_state = OFFLINE
             self.add_timer('connect', 30, self.connect)
             return False
 
@@ -324,7 +336,7 @@ class Network(object):
             self.sock.close()
 
         self.kill_all_timers()
-        self.connected = False
+        self.connection_state = OFFLINE
 
 
     def disconnect(self):
@@ -392,7 +404,7 @@ class Network(object):
 
     def pingtimer(self):
         self.kill_timer('ping')
-        if not self.connected or not self.enabled:
+        if not self.connection_state or not self.enabled:
             return
 
         ctime = time.time()
@@ -419,7 +431,7 @@ class Network(object):
     def _event_PING(self, event):
         ctime = time.time()
         self.lastping = (ctime, ctime - self.lastping[0])
-        logger.debug("ping time: %s seconds", self.lastping[1])
+        #logger.debug("ping time: %s seconds", self.lastping[1])
         self.send('PONG ' + event.text)
 
 
@@ -446,11 +458,41 @@ class Network(object):
             self.nick = event.dest
 
 
+    def _event_MODE(self, event):
+        pass
+
+
     def _event_1(self, event):
         self.server = event.source
 
 
-    def _event_376(self, event):
+    def _event_4(self, event): # ircd version
+        # not implmented yet.
+        # need to detect ircd version and supported modes:
+        # irc.example.com InspIRCd-2.0 BHIRSWcdikorswx BCFIKMNORSTabdefghijklmnopqrstvz FIabdefghjkloqv
+        pass
+
+
+    def _event_5(self, event): # ircd options
+        text = re.sub(r' ?:.*$', '', event.fulltext)
+        items = text.split()
+        for setting in items:
+            if '=' in setting:
+                key, value = setting.split('=')
+                try:
+                    value = int(value)
+                
+                except ValueError:
+                    pass
+                
+                self.ircd_options[key] = value
+                
+            else:
+                self.ircd_flags.append(setting)
+
+
+    def _event_376(self, event): # end of MOTD. fully connected
+        self.connection_state = ONLINE
         for func in self.config.get('onconnect', []):
             try:
                 func(self)
@@ -464,8 +506,25 @@ class Network(object):
         self.add_timer('ping', 30, self.pingtimer)
 
 
-    def _event_422(self, event):
+    def _event_422(self, event): # no MOTD. fully connected
         self._event_376(event)
+
+
+    def _event_433(self, event): # nickname taken
+        # need to use a altnick if we get this while connecting. other times we dont care
+        if self.connection_state == ONLINE:
+            # checking if event.dest == * would work too (since we dont have a nick yet)
+            return
+        
+        # our chosen nickname is taken.
+        if self.nick == self.config['nick'] and 'altnick' in self.config:
+            self.nick = self.config['altnick']
+
+        else:
+            self.nick = self.config['nick'] + str(random.randint(1,1000))
+
+        self.send("NICK %s" % self.nick)
+        
 
 
 class Client(object):
@@ -539,3 +598,5 @@ class Client(object):
 
     def handle_event(self, event):
         pass
+
+
