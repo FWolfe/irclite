@@ -116,6 +116,7 @@ class Event(object):
         if numeric:
             self.type = str(numeric)
 
+
     def reply(self, text):
         if self.type != 'PRIVMSG':
             return # TODO: raise exception
@@ -133,20 +134,6 @@ class Event(object):
 
         except ValueError:
             return 0
-
-
-    def as_command(self, start=1, stop=None):
-        """
-        returns the text as if it was a irc bot's command arguments
-        ie:
-            a text of ".weather mycity, mycountry"
-            returns "mycity, mycountry"
-        """
-        try:
-            return ' '.join(self.text.split()[start:stop])
-
-        except IndexError:
-            return None
 
 
     def __repr__(self):
@@ -213,11 +200,10 @@ class Network(object):
         if self.name < other:
             return -1
 
-        elif self.name == other:
+        if self.name == other:
             return 0
 
-        else:
-            return -1
+        return 1
 
 
     def init(self):
@@ -423,7 +409,7 @@ class Network(object):
         event = Event(self, data)
         logger.debug("Recv <-- %s", repr(event))
         handler = getattr(self, '_event_%s' % event.type, None)
-        if handler:
+        if handler and callable(handler):
             handler(event)
 
         self.client.handle_event(event)
@@ -463,8 +449,8 @@ class Network(object):
             try:
                 func(self)
 
-            except:
-                pass
+            except Exception as msg:
+                logger.error("Exception thrown in onconnect callback: %s", msg)
 
         for chan in self.config.get('channels', []):
             self.join(chan)
@@ -487,8 +473,12 @@ class Client(object):
     def add_network(self, name, host, port=6667, config=None, enabled=True):
         """Adds a IRC network. Note this does not initialize it.
         """
-        if not config:
-            config = self.config
+        if config is None:
+            config = {}
+
+        for key, value in self.config.items():
+            if key not in ('plugins', 'networks') and not key.startswith("_"):
+                config.setdefault(key, value)
 
         self.networks[name] = Network(
             self,
@@ -509,8 +499,7 @@ class Client(object):
                 name=net['name'],
                 host=net['host'],
                 port=net.get('port', 6667),
-                #TODO: this needs a much better system, create a new config obj and apply defaults.
-                config=net.get('config', self.config),
+                config=net.get('config', None),
                 enabled=net.get('enabled', True))
 
 
