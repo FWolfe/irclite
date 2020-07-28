@@ -110,10 +110,9 @@ class Event(object):
             self.dest = tokens[2]
             if self.dest.startswith('#'):
                 self.chan = self.dest
+
             if len(tokens) > 3:
-                pos = data.index(self.dest) + len(self.dest) + 1
-                if len(data) >= pos:
-                    self.fulltext = data[pos:] 
+                self.fulltext = data.split(None, 3)[-1]
 
         if self.source:
             match = RE_SENDER.match(self.source)
@@ -148,7 +147,7 @@ class Event(object):
 
 
     def __repr__(self):
-        return self.data
+        return repr(self.data)
 
 
     def __str__(self):
@@ -203,6 +202,7 @@ class Network(object):
         self.timers = {}
         self.ircd_options = {}
         self.ircd_flags = []
+        self.usermodes = set()
 
     def __str__(self):
         return self.name
@@ -348,9 +348,11 @@ class Network(object):
         #self.kill_all_timers() # redundant.
 
 
-    def send(self, message):
+    def send(self, message, log=True):
         """sends a message over the socket"""
-        logger.debug("Send -> %s", message)
+        if log:
+            logger.debug("Send -> %s", repr(message))
+
         try:
             result = self.sock.sendall(bytearray(message + "\r\n", 'ascii'))
             if result == 0:
@@ -420,7 +422,9 @@ class Network(object):
         """parses the IRC message
         """
         event = Event(self, data)
-        logger.debug("Recv <-- %s", repr(event))
+        if event.type != 'PING':
+            logger.debug("Recv <-- %s", repr(event))
+        
         handler = getattr(self, '_event_%s' % event.type, None)
         if handler and callable(handler):
             handler(event)
@@ -432,7 +436,7 @@ class Network(object):
         ctime = time.time()
         self.lastping = (ctime, ctime - self.lastping[0])
         #logger.debug("ping time: %s seconds", self.lastping[1])
-        self.send('PONG ' + event.text)
+        self.send('PONG ' + event.text, False)
 
 
     def _event_PONG(self, event):
@@ -459,7 +463,24 @@ class Network(object):
 
 
     def _event_MODE(self, event):
-        pass
+        if event.dest == self.nick:
+            modes = re.findall(r'([\+\-])([^\+\-\s]+)', event.fulltext)
+            if not modes:
+                return
+
+            for group in modes:
+                call = None
+                if group[0] == '+':
+                    call = self.usermodes.add
+
+                elif group[0] == '-':
+                    call = self.usermodes.remove
+
+                if not call:
+                    continue
+
+                for m in group[1]:
+                    call(m)
 
 
     def _event_1(self, event):
@@ -500,10 +521,17 @@ class Network(object):
             except Exception as msg:
                 logger.error("Exception thrown in onconnect callback: %s", msg)
 
+        if "oper_id" in self.config and "oper_pass" in self.config:
+            self.send("oper %s %s" % (self.config['oper_id'], self.config['oper_pass']))
+
         for chan in self.config.get('channels', []):
             self.join(chan)
 
         self.add_timer('ping', 30, self.pingtimer)
+
+
+    def _event_381(self, event): # oper successful
+        pass
 
 
     def _event_422(self, event): # no MOTD. fully connected
@@ -513,7 +541,7 @@ class Network(object):
     def _event_433(self, event): # nickname taken
         # need to use a altnick if we get this while connecting. other times we dont care
         if self.connection_state == ONLINE:
-            # checking if event.dest == * would work too (since we dont have a nick yet)
+            # checking if event.dest == '*' would work too (since we dont have a nick yet)
             return
         
         # our chosen nickname is taken.
@@ -525,6 +553,9 @@ class Network(object):
 
         self.send("NICK %s" % self.nick)
         
+
+    def _event_491(self, event): # invalid oper credentials
+        pass
 
 
 class Client(object):
@@ -552,6 +583,7 @@ class Client(object):
             port=port,
             config=config,
             enabled=enabled)
+
         return True
 
 
@@ -598,5 +630,3 @@ class Client(object):
 
     def handle_event(self, event):
         pass
-
-
