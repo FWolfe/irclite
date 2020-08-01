@@ -434,10 +434,10 @@ class Network(object):
         event = Event(self, data)
         if event.type != 'PING':
             logger.debug("Recv <-- %s", repr(event))
-        
+
         handler = getattr(self, '_event_%s' % event.type, None)
         if handler and callable(handler):
-            handler(event)
+            handler(event) # pylint: disable=E1102
 
         self.client.handle_event(event)
 
@@ -467,7 +467,7 @@ class Network(object):
             event.ctcp = match.group(1)
             event.text = match.group(2)
             return
-        
+
         if event.text[0] == self.config.get('command_prefix', ''):
             match = re.match(r"(\S+)(?:\s+(.+))?$", event.text[1:])
             if not match:
@@ -509,8 +509,7 @@ class Network(object):
 
     def _event_4(self, event): # ircd version
         # not implmented yet.
-        # need to detect ircd version and supported modes:
-        # irc.example.com InspIRCd-2.0 BHIRSWcdikorswx BCFIKMNORSTabdefghijklmnopqrstvz FIabdefghjkloqv
+        # need to detect ircd version and supported modes
         pass
 
 
@@ -522,12 +521,12 @@ class Network(object):
                 key, value = setting.split('=')
                 try:
                     value = int(value)
-                
+
                 except ValueError:
                     pass
-                
+
                 self.ircd_options[key] = value
-                
+
             else:
                 self.ircd_flags.append(setting)
 
@@ -540,7 +539,7 @@ class Network(object):
 
             except Exception as msg:
                 logger.error("Exception thrown in onconnect callback: %s", msg)
-        
+
         if self.config.get('nickserv') and self.nick == self.config['nick']:
             self.privmsg('nickserv', 'identify %s' % self.config['nickserv'])
 
@@ -566,16 +565,16 @@ class Network(object):
         if self.connection_state == ONLINE:
             # checking if event.dest == '*' would work too (since we dont have a nick yet)
             return
-        
+
         # our chosen nickname is taken.
         if self.nick == self.config['nick'] and 'altnick' in self.config:
             self.nick = self.config['altnick']
 
         else:
-            self.nick = self.config['nick'] + str(random.randint(1,1000))
+            self.nick = self.config['nick'] + str(random.randint(1, 1000))
 
         self.send("NICK %s" % self.nick)
-        
+
 
     def _event_491(self, event): # invalid oper credentials
         pass
