@@ -62,6 +62,7 @@ import gevent
 
 RE_TYPE = re.compile(r"^(?:\:(\S+)|\:?([a-z0-9A-Z_-]+\.[a-z0-9A-Z_\.-]+))$")
 RE_SENDER = re.compile(r"^\:?([^\!]+)\!([^\@]+)\@(\S+)$")
+RE_CTCP = re.compile(r"\001(\S+)(?: +(.+))?\001")
 
 # connection state flags
 OFFLINE = 0
@@ -73,7 +74,7 @@ logger = logging.getLogger(__name__)
 class Event(object):
     """Class representing a IRC event
     """
-    __slots__ = ('network', 'text', 'fulltext', 'dest', 'type', 'source',
+    __slots__ = ('network', 'text', 'fulltext', 'dest', 'type', 'ctcp', 'source',
                  'nick', 'ident', 'host', 'chan', 'data')
 
     def __init__(self, network, data):
@@ -81,6 +82,7 @@ class Event(object):
         self.fulltext = None
         self.dest = None
         self.type = None
+        self.ctcp = None
         self.source = None
         self.nick = None
         self.ident = None
@@ -369,6 +371,14 @@ class Network(object):
         self.send(f'PING {self.server}')
 
 
+    def ctcp(self, dest, flag, message=None):
+        """sends a PRIVMSG to the irc server"""
+        if message:
+            self.send(f'PRIVMSG {dest} :\001{flag} {message}\001')
+        else:
+            self.send(f'PRIVMSG {dest} :\001{flag}\001')
+
+
     def privmsg(self, dest, message):
         """sends a PRIVMSG to the irc server"""
         if not isinstance(message, (list, tuple)):
@@ -450,6 +460,14 @@ class Network(object):
 
 
     def _event_PRIVMSG(self, event):
+        # check ctcp
+        match = RE_CTCP.match(event.text)
+        if match:
+            event.type = 'CTCP'
+            event.ctcp = match.group(1)
+            event.text = match.group(2)
+            return
+        
         if event.text[0] == self.config.get('command_prefix', ''):
             match = re.match(r"(\S+)(?:\s+(.+))?$", event.text[1:])
             if not match:
@@ -460,6 +478,8 @@ class Network(object):
     def _event_NICK(self, event):
         if event.nick == self.nick:
             self.nick = event.dest
+            if self.config.get('nickserv') and self.nick == self.config['nick']:
+                self.privmsg('nickserv', 'identify %s' % self.config['nickserv'])
 
 
     def _event_MODE(self, event):
@@ -520,6 +540,9 @@ class Network(object):
 
             except Exception as msg:
                 logger.error("Exception thrown in onconnect callback: %s", msg)
+        
+        if self.config.get('nickserv') and self.nick == self.config['nick']:
+            self.privmsg('nickserv', 'identify %s' % self.config['nickserv'])
 
         if "oper_id" in self.config and "oper_pass" in self.config:
             self.send("oper %s %s" % (self.config['oper_id'], self.config['oper_pass']))
@@ -591,6 +614,9 @@ class Client(object):
         """Sets up the config file and adds all networks defined in it.
         """
         self.config = config
+        config.setdefault('nick', 'irclite')
+        config.setdefault('ident', 'irclite')
+        config.setdefault('realname', 'irclite')
         for net in self.config.get('networks', []):
             self.add_network(
                 name=net['name'],
